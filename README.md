@@ -10,7 +10,7 @@ A production-ready Model Context Protocol (MCP) server providing comprehensive a
 
 ## 🌟 Features
 
-- **18 Comprehensive Tools** - Complete coverage of pricing, financials, options, holders, and news
+- **19 Comprehensive Tools** - Complete coverage of pricing, financials, options, holders, and news
 - **Intelligent SQLite Caching** - Reduces latency by 90% with TTL-based cache management
 - **Multi-Market Support** - Works globally with configurable market normalization (US, BR, UK, DE, FR, JP, IN, HK, AU, CA, and more)
 - **Type-Safe** - Full Pydantic models with complete type hints throughout
@@ -351,6 +351,41 @@ Get analyst price targets and estimates.
 - Target mean, median, high, low
 - Number of analysts
 - Recommendation (buy/hold/sell)
+
+#### 19. `screen_stocks`
+Screen stocks with a predefined Yahoo screen **or** custom filters (exactly one mode).
+
+**Parameters:** `predefined_query`, `filters`, `offset` (>= 0, default 0), `size` (1-250, default 25), `sort_field` (custom default `ticker`), `sort_ascending` (custom default `false`).
+
+**Predefined mode** (e.g. `day_gainers`, `day_losers`, `most_actives`, `aggressive_small_caps`):
+```json
+{
+  "predefined_query": "day_gainers",
+  "size": 10
+}
+```
+
+**Custom mode** - `filters` is a list of conditions combined with AND. Each condition is `{"operator", "field", "value"}`.
+
+Operators: `eq`, `gt`, `lt`, `gte`, `lte` (scalar value), `is-in` (list of values), `btwn` (`[low, high]`), and the logical groups `and` / `or` with `{"operator": "and", "conditions": [...]}` (at least 2 conditions, nestable).
+```json
+{
+  "filters": [
+    {
+      "operator": "and",
+      "conditions": [
+        {"operator": "gt", "field": "percentchange", "value": 3},
+        {"operator": "eq", "field": "region", "value": "us"}
+      ]
+    }
+  ],
+  "size": 25,
+  "sort_field": "percentchange",
+  "sort_ascending": false
+}
+```
+
+**Output:** `start`, `count`, `total` and `quotes`. Results are not cached.
 
 ---
 

@@ -35,6 +35,7 @@ cache = CacheManager()
 NO_CACHE_TOOLS = {
     "get_current_stock_price",
     "get_option_chain",
+    "screen_stocks",
 }
 
 

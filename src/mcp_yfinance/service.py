@@ -31,6 +31,20 @@ from .models import (
 )
 from .utils import format_dataframe_dates, normalize_ticker
 
+SCREENER_OPERATORS = (
+    "eq",
+    "is-in",
+    "btwn",
+    "gt",
+    "lt",
+    "gte",
+    "lte",
+    "and",
+    "or",
+)
+SCREENER_MAX_SIZE = 250
+SCREENER_MAX_DEPTH = 10
+
 
 def safe_float(value: Any) -> float | None:
     """Convert value to float, handling NaN/None gracefully.
@@ -58,6 +72,100 @@ def safe_int(value: Any) -> int | None:
     if pd.isna(value):
         return None
     return int(value)
+
+
+def _is_number(value: Any) -> bool:
+    """Return True for real numbers (bool is excluded)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively convert a value into JSON-native types.
+
+    NaN/NaT/None become None, numpy/pandas scalars become Python scalars,
+    timestamps become ISO strings and unknown objects become strings.
+    """
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return None if pd.isna(value) else value.isoformat()
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            return _json_safe(value.item())
+        except (ValueError, TypeError):
+            pass
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return None if pd.isna(value) or value in (float("inf"), float("-inf")) else value
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
+def _build_equity_query(condition: Any, depth: int = 0, path: str = "filters") -> Any:
+    """Recursively build a yfinance EquityQuery from a condition dictionary."""
+    if depth > SCREENER_MAX_DEPTH:
+        raise InvalidParameterError(path, "nesting too deep")
+    if not isinstance(condition, dict):
+        raise InvalidParameterError(path, condition, ["object with 'operator'"])
+
+    operator = condition.get("operator")
+    if not isinstance(operator, str) or operator.lower() not in SCREENER_OPERATORS:
+        raise InvalidParameterError(f"{path}.operator", operator, list(SCREENER_OPERATORS))
+    operator = operator.lower()
+
+    if operator in ("and", "or"):
+        children = condition.get("conditions")
+        if not isinstance(children, list) or len(children) < 2:
+            raise InvalidParameterError(
+                f"{path}.conditions", children, ["list of at least 2 conditions"]
+            )
+        operands = [
+            _build_equity_query(child, depth + 1, f"{path}.conditions[{i}]")
+            for i, child in enumerate(children)
+        ]
+        return yf.EquityQuery(operator, operands)
+
+    field = condition.get("field")
+    if not isinstance(field, str) or not field:
+        raise InvalidParameterError(f"{path}.field", field, ["non-empty string"])
+
+    if operator == "is-in":
+        values = condition.get("value", condition.get("values"))
+        if not isinstance(values, list) or not values:
+            raise InvalidParameterError(f"{path}.value", values, ["non-empty list"])
+        operands = [field, *values]
+    elif operator == "btwn":
+        values = condition.get("value", condition.get("values"))
+        if (
+            not isinstance(values, list)
+            or len(values) != 2
+            or not all(_is_number(v) for v in values)
+        ):
+            raise InvalidParameterError(f"{path}.value", values, ["[low, high] numbers"])
+        operands = [field, *values]
+    else:
+        if "value" not in condition:
+            raise InvalidParameterError(f"{path}.value", None, ["required"])
+        value = condition["value"]
+        if isinstance(value, (list, dict)) or value is None:
+            raise InvalidParameterError(f"{path}.value", value, ["scalar string or number"])
+        if operator != "eq" and not _is_number(value):
+            raise InvalidParameterError(f"{path}.value", value, ["number"])
+        operands = [field, value]
+
+    try:
+        return yf.EquityQuery(operator, operands)
+    except ValueError as e:
+        raise InvalidParameterError(path, str(e)) from e
 
 
 class YahooFinanceService:
@@ -1064,3 +1172,113 @@ class YahooFinanceService:
             if isinstance(e, (DataNotAvailableError, TickerNotFoundError)):
                 raise
             raise YFinanceAPIError(str(e), symbol) from e
+
+    def screen_stocks(
+        self,
+        predefined_query: str | None = None,
+        filters: list[dict[str, Any]] | None = None,
+        offset: int = 0,
+        size: int = 25,
+        sort_field: str | None = None,
+        sort_ascending: bool | None = None,
+    ) -> str:
+        """Screen stocks using a predefined Yahoo screen or custom equity filters.
+
+        Exactly one mode must be used: provide either predefined_query or filters.
+
+        Predefined mode: pass a name such as day_gainers, day_losers,
+        most_actives or aggressive_small_caps.
+
+        Custom mode: pass filters, a list of condition objects (combined with AND).
+        Each condition is {"operator": op, "field": name, "value": v}. Supported
+        operators: eq, gt, lt, gte, lte (scalar value), is-in (value is a list of
+        options), btwn (value is [low, high]), and the logical groups and/or,
+        written {"operator": "and", "conditions": [...]} with at least 2 nested
+        conditions (groups may be nested). Example: [{"operator": "and",
+        "conditions": [{"operator": "gt", "field": "percentchange", "value": 3},
+        {"operator": "eq", "field": "region", "value": "us"}]}]
+
+        Args:
+            predefined_query: Name of a predefined screen (predefined mode).
+            filters: List of filter conditions as described above (custom mode).
+            offset: Number of results to skip, must be >= 0.
+            size: Number of results to return, between 1 and 250.
+            sort_field: Field to sort by. Custom default is "ticker"; predefined screens keep their own default.
+            sort_ascending: Sort ascending when true. Custom default is false.
+
+        Returns:
+            JSON string with start, count, total and quotes of the screen result.
+
+        Raises:
+            InvalidParameterError: If the mode, filters, size or offset are invalid.
+            DataNotAvailableError: If the screener returns no result.
+            YFinanceAPIError: If the API request fails.
+        """
+        has_predefined = predefined_query is not None
+        has_filters = filters is not None
+        if has_predefined == has_filters:
+            raise InvalidParameterError(
+                "predefined_query/filters",
+                "both provided" if has_predefined else "neither provided",
+                ["exactly one of predefined_query or filters"],
+            )
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+            raise InvalidParameterError("offset", offset, ["integer >= 0"])
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or not 1 <= size <= SCREENER_MAX_SIZE
+        ):
+            raise InvalidParameterError("size", size, [f"integer between 1 and {SCREENER_MAX_SIZE}"])
+        if sort_field is not None and (not isinstance(sort_field, str) or not sort_field):
+            raise InvalidParameterError("sort_field", sort_field, ["non-empty string"])
+
+        kwargs: dict[str, Any] = {"offset": offset}
+
+        if has_predefined:
+            known = getattr(yf, "PREDEFINED_SCREENER_QUERIES", None)
+            if (
+                not isinstance(predefined_query, str)
+                or not predefined_query
+                or (known and predefined_query not in known)
+            ):
+                raise InvalidParameterError(
+                    "predefined_query", predefined_query, sorted(known) if known else None
+                )
+            query: Any = predefined_query
+            kwargs["count"] = size
+        else:
+            if isinstance(filters, dict):
+                filters = [filters]
+            if not isinstance(filters, list) or not filters:
+                raise InvalidParameterError("filters", filters, ["non-empty list of conditions"])
+            built = [
+                _build_equity_query(f, path=f"filters[{i}]") for i, f in enumerate(filters)
+            ]
+            query = built[0] if len(built) == 1 else yf.EquityQuery("and", built)
+            kwargs["size"] = size
+            kwargs["sortField"] = sort_field or "ticker"
+            kwargs["sortAsc"] = bool(sort_ascending)
+
+        if has_predefined:
+            if sort_field is not None:
+                kwargs["sortField"] = sort_field
+            if sort_ascending is not None:
+                kwargs["sortAsc"] = sort_ascending
+
+        try:
+            response = yf.screen(query, **kwargs)
+        except Exception as e:
+            raise YFinanceAPIError(str(e)) from e
+
+        if not isinstance(response, dict):
+            raise DataNotAvailableError("screener results", predefined_query or "custom query")
+
+        quotes = response.get("quotes") or []
+        result = {
+            "start": response.get("start", offset),
+            "count": response.get("count", len(quotes)),
+            "total": response.get("total"),
+            "quotes": quotes,
+        }
+        return json.dumps(_json_safe(result), indent=2, allow_nan=False)
