@@ -238,6 +238,10 @@ def generate_tool_schema(func: Callable) -> dict[str, Any]:
                 enum_values = [e.value for e in annotation]
                 param_type = "string"
 
+            # Check for list types (e.g., list[dict[str, Any]] | None)
+            elif annotation_str.lower().startswith("list[") or "list[" in annotation_str.lower():
+                param_type = "array"
+
             # Check for basic types
             elif "int" in annotation_str.lower():
                 param_type = "integer"
@@ -248,6 +252,8 @@ def generate_tool_schema(func: Callable) -> dict[str, Any]:
 
         # Build parameter schema
         param_schema: dict[str, Any] = {"type": param_type}
+        if param_type == "array":
+            param_schema["items"] = {"type": "object"}
 
         # Add enum values if available (crucial for LLM to know valid inputs)
         if enum_values:
