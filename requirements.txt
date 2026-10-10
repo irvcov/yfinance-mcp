@@ -9,7 +9,7 @@ requests>=2.31.0
 lxml>=4.9.0
 
 # MCP Protocol (for full server - Session 5)
-mcp>=1.6.0
+mcp>=1.8.0,<2
 
 # Development dependencies (optional)
 pytest>=7.0.0
@@ -18,5 +18,5 @@ mypy>=1.0.0
 ruff>=0.1.0
 
 # HTTP server dependencies
-fastapi
-uvicorn
+fastapi>=0.100.0
+uvicorn>=0.23.0
