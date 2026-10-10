@@ -34,7 +34,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp>=1.6.0",
+    "mcp>=1.8.0,<2",
     "yfinance>=0.2.62",
     "pydantic>=2.0.0",
     "pandas>=2.0.0",

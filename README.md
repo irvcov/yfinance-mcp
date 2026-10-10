@@ -611,3 +611,13 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Made with ❤️ for the MCP community**
+
+## HTTP deployment (Azure App Service)
+
+`startup.sh` runs the server over MCP Streamable HTTP with Uvicorn, bound to `0.0.0.0:$PORT`:
+
+```bash
+bash startup.sh
+```
+
+MCP clients connect to `https://<host>/mcp` (Streamable HTTP; requires `Accept: application/json, text/event-stream`). A simple `GET /health` check is also available.
